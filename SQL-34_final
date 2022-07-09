@@ -1,0 +1,141 @@
+--======================================= ПРОЕКТНАЯ РАБОТА =======================================
+
+
+
+--1	В каких городах больше одного аэропорта?	
+
+select city as "Город", count(airport_code) as "Количество аэропортов"
+from airports  
+group by city 
+having count(airport_code) > 1
+
+
+--2	В каких аэропортах есть рейсы, выполняемые самолетом с максимальной дальностью перелета? - Подзапрос
+
+select distinct departure_airport, airport_name
+from flights f 
+inner join aircrafts a on f.aircraft_code = a.aircraft_code 
+inner join airports a2 on f.departure_airport = a2.airport_code 
+where "range" = (select max("range")
+                 from aircrafts) 
+                 
+                 
+-- 3	Вывести 10 рейсов с максимальным временем задержки вылета - Оператор LIMIT
+
+                 
+select flight_id, flight_no, scheduled_departure as "Время вылета по расписанию", actual_departure as "Фактическое время вылета", actual_departure-scheduled_departure as "Время задержки вылета"
+from flights f
+where actual_departure is not null 
+order by "Время задержки вылета" desc
+limit 10
+
+
+--4	Были ли брони, по которым не были получены посадочные талоны? - Верный тип JOIN
+
+
+select  t.ticket_no, book_ref, boarding_no
+from tickets t
+left join boarding_passes bp on t.ticket_no = bp.ticket_no
+where boarding_no is null
+
+
+
+--5	Найдите свободные места для каждого рейса, их % отношение к общему количеству мест в самолете.
+--Добавьте столбец с накопительным итогом - суммарное накопление количества вывезенных пассажиров из каждого аэропорта на каждый день. 
+--Т.е. в этом столбце должна отражаться накопительная сумма - сколько человек уже вылетело из данного аэропорта на этом или более ранних рейсах за день. - Оконная функция
+-- Подзапросы или cte
+
+with cte as
+   (select departure_airport, actual_departure, f.flight_id, flight_no, f.aircraft_code, status, s.seat_no as "Места в самолёте", bp.seat_no as "Места по посадочным талонам", 
+       case 
+         when s.seat_no = bp.seat_no then 'занято'
+         else 'свободно'
+       end as "Статус места"
+   from flights f 
+   inner join seats s on f.aircraft_code = s.aircraft_code 
+   left join boarding_passes bp on f.flight_id = bp.flight_id and s.seat_no = bp.seat_no) 
+select departure_airport, actual_departure::date, flight_id,
+       count ("Статус места") filter (where "Статус места" = 'занято') as "Количество занятых мест",     
+       count ("Статус места") filter (where "Статус места" = 'свободно') as "Количество свободных мест", 
+       round(((count ("Статус места") filter (where "Статус места" = 'свободно')/count ("Места в самолёте")::numeric)*100),2) as "Доля свободных мест",
+       sum(count ("Статус места") filter (where "Статус места" = 'занято')) filter (where status  = 'Departed' or status  = 'Arrived') over (partition by departure_airport, actual_departure::date order by actual_departure) as "Вылетело из аэропорта в день"
+from cte
+group by flight_id, flight_no, status, departure_airport, actual_departure::date, actual_departure
+
+    
+--6	Найдите процентное соотношение перелетов по типам самолетов от общего количества. - Подзапрос
+-- Оператор ROUND
+
+
+select model, count(flight_id) as "Количество перелётов", round(count(flight_id)/(select count(flight_id) from flights)::numeric*100,1) as "Доля перелётов"
+from flights f 
+full join aircrafts a using(aircraft_code)
+group by model
+order by "Доля перелётов" desc
+ 
+ 
+-- 7 Были ли города, в которые можно  добраться бизнес - классом дешевле, чем эконом-классом в рамках перелета?	- CTE
+
+ with cte as 
+    (select distinct f.flight_id, arrival_airport, city, fare_conditions, amount as "B_amount"
+    from flights f
+    inner join airports a on  f.arrival_airport = a.airport_code
+    inner join ticket_flights tf on f.flight_id = tf.flight_id
+    where fare_conditions = 'Business'),
+    cte2 as 
+    (select distinct f.flight_id, arrival_airport, city, fare_conditions, amount as "E_amount"
+    from flights f
+    inner join airports a on  f.arrival_airport = a.airport_code
+    inner join ticket_flights tf on f.flight_id = tf.flight_id
+    where fare_conditions = 'Economy')
+select cte.*,  cte2.fare_conditions, "E_amount"
+from cte
+inner join cte2 using(flight_id)
+where "B_amount"<"E_amount"
+
+--8	Между какими городами нет прямых рейсов? - Декартово произведение в предложении FROM. Самостоятельно созданные представления (если облачное подключение, то без представления). Оператор EXCEPT
+
+CREATE materialized view city_airports as 
+select distinct departure_airport, a.city as "Город отправления", arrival_airport, a2.city  as "Город прибытия"
+from flights f 
+inner join airports a on f.departure_airport = a.airport_code 
+inner join airports a2 on  f.arrival_airport = a2.airport_code
+with data
+
+CREATE materialized view city as 
+select distinct city
+from airports  
+with data
+
+select c.city as "Город отправления", s.city as "Город прибытия"
+from city c 
+cross join city s
+where c.city != s.city
+except
+select "Город отправления", "Город прибытия"
+from city_airports
+
+
+--9	Вычислите расстояние между аэропортами, связанными прямыми рейсами, сравните с допустимой максимальной дальностью перелетов  в самолетах, обслуживающих эти рейсы *
+--- Оператор RADIANS или использование sind/cosd, CASE 
+
+select *,
+    case 
+         when "Расстояние между аэропортами" <= "Максимальная дальность" then 'Не превышает допустимую дальность'
+         else 'Превышает допустимую дальность'
+    end as "Сравнение с допустимым"
+from 
+    (select distinct departure_airport, a.airport_name, arrival_airport, b.airport_name, model, "range" as "Максимальная дальность", 
+                     round(6371 * acos(sind(a.latitude)*sind(b.latitude)+cosd(a.latitude)*cosd(b.latitude)*cosd(a.longitude-b.longitude))::numeric) as "Расстояние между аэропортами"
+    from flights f 
+    inner join airports a on f.departure_airport = a.airport_code 
+    inner join airports b on  f.arrival_airport = b.airport_code
+    inner join aircrafts a2 on f.aircraft_code = a2.aircraft_code) t
+order by  departure_airport   
+
+
+--d = arccos {sin(latitude_a)·sin(latitude_b) + cos(latitude_a)·cos(latitude_b)·cos(longitude_a - longitude_b)},
+-- где latitude_a и latitude_b — широты, 
+--longitude_a, longitude_b — долготы данных пунктов, d — расстояние между пунктами измеряется в радианах длиной дуги большого круга земного шара.
+--Расстояние между пунктами, измеряемое в километрах, определяется по формуле:
+--L = d·R, где R = 6371 км — средний радиус земного шара.
